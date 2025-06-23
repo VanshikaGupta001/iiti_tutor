@@ -1,6 +1,5 @@
-
-import { getBackendUrl } from '@/config/backend';
-import { ServiceResponse } from '@/types/chat';
+import { getBackendUrl } from '../config/backend';
+import { ServiceResponse } from '../types/chat';
 
 export const sendMessage = async (prompt: string, file?: File): Promise<ServiceResponse> => {
   try {
