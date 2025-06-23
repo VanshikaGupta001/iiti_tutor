@@ -1,15 +1,16 @@
 
-
 import React, { useState, useEffect, useRef } from 'react';
 import Message from './Message';
 import ChatInput from './ChatInput';
 import TypingIndicator from './TypingIndicator';
+import { ServiceResponse } from '../types/chat';
 
 interface ChatMessage {
   id: string;
   message: string;
   isBot: boolean;
   timestamp: string;
+  file?: Blob;
 }
 
 interface ChatProps {
@@ -61,27 +62,39 @@ const Chat: React.FC<ChatProps> = ({ selectedFeature }) => {
 
     if (!isBot) {
       setIsLoading(true);
-      setTimeout(() => {
-        const responses = [
-          "That's an excellent question...",
-          "Here's how we can approach this...",
-          "Based on IITI curriculum...",
-        ];
-        setMessages(prev => [...prev, {
-          ...newMessage,
-          id: (Date.now() + 1).toString(),
-          message: responses[Math.floor(Math.random() * responses.length)],
-          isBot: true
-        }]);
-        setIsLoading(false);
-      }, 1500);
+    }
+  };
+
+  const handleReceiveResponse = (response: ServiceResponse) => {
+    setIsLoading(false);
+    
+    if (response.text) {
+      const botMessage: ChatMessage = {
+        id: (Date.now() + 1).toString(),
+        message: response.text,
+        isBot: true,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        file: response.file || undefined
+      };
+      setMessages(prev => [...prev, botMessage]);
+    }
+
+    // Handle file download if present
+    if (response.file) {
+      const url = URL.createObjectURL(response.file);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'response.pdf';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     }
   };
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
       <div className="flex-1 overflow-y-auto p-6 pt-[81px] space-y-4 scroll-smooth">
-
         {messages.map((msg) => (
           <div key={msg.id} className="max-w-4xl mx-auto">
             <Message message={msg.message} isBot={msg.isBot} timestamp={msg.timestamp} />
@@ -93,7 +106,11 @@ const Chat: React.FC<ChatProps> = ({ selectedFeature }) => {
 
       <div className="w-full border-t border-gray-700 bg-black px-4 py-2">
         <div className="max-w-4xl mx-auto">
-          <ChatInput onSendMessage={handleSendMessage} isLoading={isLoading} />
+          <ChatInput 
+            onSendMessage={handleSendMessage} 
+            onReceiveResponse={handleReceiveResponse}
+            isLoading={isLoading} 
+          />
         </div>
       </div>
     </div>
@@ -101,10 +118,3 @@ const Chat: React.FC<ChatProps> = ({ selectedFeature }) => {
 };
 
 export default Chat;
-
-
-
-
-
-
-  
