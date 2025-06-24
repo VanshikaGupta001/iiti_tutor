@@ -102,7 +102,7 @@ const Chat: React.FC<ChatProps> = ({ selectedFeature }) => {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="w-full border-t border-gray-700 bg-black px-4 py-2">
+      <div className="w-full border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-black px-4 py-2 transition-colors duration-300">
         <div className="max-w-4xl mx-auto">
           <ChatInput 
             onSendMessage={handleSendMessage} 

@@ -60,9 +60,9 @@ const Message: React.FC<MessageProps> = ({
         )}
         
         <div className={`
-          px-4 py-3 rounded-2xl shadow-lg backdrop-blur-sm max-h-96 overflow-y-auto
+          px-4 py-3 rounded-2xl shadow-lg backdrop-blur-sm max-h-96 overflow-y-auto transition-colors duration-300
           ${isBot 
-            ? 'bg-gray-800/80 border border-cyan-500/20 text-white rounded-tl-none' 
+            ? 'bg-gray-100 dark:bg-gray-800/80 border border-gray-200 dark:border-cyan-500/20 text-gray-900 dark:text-white rounded-tl-none' 
             : 'bg-gradient-to-r from-cyan-600 to-purple-600 text-white rounded-tr-none'
           }
         `}>
@@ -70,7 +70,7 @@ const Message: React.FC<MessageProps> = ({
             {message}
           </pre>
         </div>
-        <div className={`text-xs text-gray-400 mt-1 px-2 ${isBot ? 'text-left' : 'text-right'}`}>
+        <div className={`text-xs text-gray-500 dark:text-gray-400 mt-1 px-2 ${isBot ? 'text-left' : 'text-right'}`}>
           {timestamp}
         </div>
       </div>
