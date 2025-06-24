@@ -11,7 +11,6 @@ interface FileButtonProps {
 
 const FileButton: React.FC<FileButtonProps> = ({ 
   fileName, 
-  fileBlob, 
   onDownload, 
   className = "" 
 }) => {
