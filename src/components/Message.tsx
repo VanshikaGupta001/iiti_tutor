@@ -1,13 +1,36 @@
+
 import React from 'react';
 import { Bot, User } from 'lucide-react';
+import FileButton from './FileButton';
 
 interface MessageProps {
   message: string;
   isBot: boolean;
   timestamp: string;
+  file?: Blob;
+  fileName?: string;
 }
 
-const Message: React.FC<MessageProps> = ({ message, isBot, timestamp }) => {
+const Message: React.FC<MessageProps> = ({ 
+  message, 
+  isBot, 
+  timestamp, 
+  file, 
+  fileName 
+}) => {
+  const handleFileDownload = () => {
+    if (file && fileName) {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  };
+
   return (
     <div className={`flex items-start space-x-3 mb-6 ${isBot ? '' : 'flex-row-reverse space-x-reverse'}`}>
       <div className={`
@@ -25,6 +48,17 @@ const Message: React.FC<MessageProps> = ({ message, isBot, timestamp }) => {
       </div>
       
       <div className={`flex-1 max-w-md ${isBot ? '' : 'flex flex-col items-end'}`}>
+        {/* File attachment display */}
+        {file && fileName && (
+          <div className={`mb-2 ${isBot ? '' : 'flex justify-end'}`}>
+            <FileButton
+              fileName={fileName}
+              fileBlob={file}
+              onDownload={handleFileDownload}
+            />
+          </div>
+        )}
+        
         <div className={`
           px-4 py-3 rounded-2xl shadow-lg backdrop-blur-sm
           ${isBot 

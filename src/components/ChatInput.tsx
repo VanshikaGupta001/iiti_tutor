@@ -5,7 +5,7 @@ import { sendMessage } from '../services/chatService';
 import { ServiceResponse } from '../types/chat';
 
 interface ChatInputProps {
-  onSendMessage: (message: string) => void;
+  onSendMessage: (message: string, isBot?: boolean, file?: File) => void;
   onReceiveResponse: (response: ServiceResponse) => void;
   isLoading: boolean;
 }
@@ -27,8 +27,8 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSendMessage, onReceiveResponse,
     setMessage('');
     setUploadedFile(null);
 
-    // Show user message in chat
-    onSendMessage(messageText);
+    // Show user message in chat with file if present
+    onSendMessage(messageText, false, fileToSend || undefined);
 
     try {
       // Send to backend

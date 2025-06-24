@@ -11,6 +11,7 @@ interface ChatMessage {
   isBot: boolean;
   timestamp: string;
   file?: Blob;
+  fileName?: string;
 }
 
 interface ChatProps {
@@ -51,12 +52,14 @@ const Chat: React.FC<ChatProps> = ({ selectedFeature }) => {
     }
   }, [selectedFeature]);
 
-  const handleSendMessage = (message: string, isBot = false) => {
+  const handleSendMessage = (message: string, isBot = false, file?: File) => {
     const newMessage: ChatMessage = {
       id: Date.now().toString(),
       message,
       isBot,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      file: file,
+      fileName: file?.name
     };
     setMessages(prev => [...prev, newMessage]);
 
@@ -74,21 +77,10 @@ const Chat: React.FC<ChatProps> = ({ selectedFeature }) => {
         message: response.text,
         isBot: true,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        file: response.file || undefined
+        file: response.file || undefined,
+        fileName: response.file ? 'response.pdf' : undefined
       };
       setMessages(prev => [...prev, botMessage]);
-    }
-
-    // Handle file download if present
-    if (response.file) {
-      const url = URL.createObjectURL(response.file);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'response.pdf';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
     }
   };
 
@@ -97,7 +89,13 @@ const Chat: React.FC<ChatProps> = ({ selectedFeature }) => {
       <div className="flex-1 overflow-y-auto p-6 pt-[81px] space-y-4 scroll-smooth">
         {messages.map((msg) => (
           <div key={msg.id} className="max-w-4xl mx-auto">
-            <Message message={msg.message} isBot={msg.isBot} timestamp={msg.timestamp} />
+            <Message 
+              message={msg.message} 
+              isBot={msg.isBot} 
+              timestamp={msg.timestamp}
+              file={msg.file}
+              fileName={msg.fileName}
+            />
           </div>
         ))}
         {isLoading && <div className="max-w-4xl mx-auto"><TypingIndicator /></div>}
