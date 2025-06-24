@@ -60,13 +60,15 @@ const Message: React.FC<MessageProps> = ({
         )}
         
         <div className={`
-          px-4 py-3 rounded-2xl shadow-lg backdrop-blur-sm
+          px-4 py-3 rounded-2xl shadow-lg backdrop-blur-sm max-h-96 overflow-y-auto
           ${isBot 
             ? 'bg-gray-800/80 border border-cyan-500/20 text-white rounded-tl-none' 
             : 'bg-gradient-to-r from-cyan-600 to-purple-600 text-white rounded-tr-none'
           }
         `}>
-          <p className="text-sm leading-relaxed">{message}</p>
+          <pre className="text-sm leading-relaxed whitespace-pre-wrap break-words font-mono text-inherit m-0">
+            {message}
+          </pre>
         </div>
         <div className={`text-xs text-gray-400 mt-1 px-2 ${isBot ? 'text-left' : 'text-right'}`}>
           {timestamp}
