@@ -1,4 +1,4 @@
-
+import 'katex/dist/katex.min.css';
 import { useState } from 'react';
 import { Menu, X } from 'lucide-react';
 import { ThemeProvider } from './contexts/ThemeContext';

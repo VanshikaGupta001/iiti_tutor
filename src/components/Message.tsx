@@ -1,7 +1,7 @@
-
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Bot, User } from 'lucide-react';
 import FileButton from './FileButton';
+import katex from 'katex';
 
 interface MessageProps {
   message: string;
@@ -9,6 +9,42 @@ interface MessageProps {
   timestamp: string;
   file?: Blob;
   fileName?: string;
+}
+
+// Utility to render text with KaTeX, supporting $...$ (inline) and $$...$$ (display)
+function renderWithKatex(text: string): React.ReactNode {
+  // Split by display math first
+  const displayParts = text.split(/(\$\$[^$]+\$\$)/g);
+  return displayParts.map((part, i) => {
+    if (/^\$\$[^$]+\$\$$/.test(part)) {
+      // Remove the $$ delimiters
+      const math = part.slice(2, -2);
+      try {
+        return (
+          <div key={i} dangerouslySetInnerHTML={{ __html: katex.renderToString(math, { displayMode: true, throwOnError: false }) }} />
+        );
+      } catch {
+        return <div key={i}>{part}</div>;
+      }
+    } else {
+      // Now split by inline math
+      const inlineParts = part.split(/(\$[^$]+\$)/g);
+      return inlineParts.map((inline, j) => {
+        if (/^\$[^$]+\$/.test(inline)) {
+          const math = inline.slice(1, -1);
+          try {
+            return (
+              <span key={j} dangerouslySetInnerHTML={{ __html: katex.renderToString(math, { displayMode: false, throwOnError: false }) }} />
+            );
+          } catch {
+            return <span key={j}>{inline}</span>;
+          }
+        } else {
+          return <span key={j}>{inline}</span>;
+        }
+      });
+    }
+  });
 }
 
 const Message: React.FC<MessageProps> = ({ 
@@ -47,7 +83,7 @@ const Message: React.FC<MessageProps> = ({
         )}
       </div>
       
-      <div className={`flex-1 max-w-md ${isBot ? '' : 'flex flex-col items-end'}`}>
+      <div className={`flex-1 max-w-xl ${isBot ? '' : 'flex flex-col items-end'}`}>
         {/* File attachment display */}
         {file && fileName && (
           <div className={`mb-2 ${isBot ? '' : 'flex justify-end'}`}>
@@ -66,9 +102,9 @@ const Message: React.FC<MessageProps> = ({
             : 'bg-gradient-to-r from-cyan-600 to-purple-600 text-white rounded-tr-none'
           }
         `}>
-          <pre className="text-sm leading-relaxed whitespace-pre-wrap break-words font-mono text-inherit m-0">
-            {message}
-          </pre>
+          <div className="text-sm leading-relaxed whitespace-pre-wrap break-words font-mono text-inherit m-0 ">
+            {renderWithKatex(message)}
+          </div>
         </div>
         <div className={`text-xs text-gray-500 dark:text-gray-400 mt-1 px-2 ${isBot ? 'text-left' : 'text-right'}`}>
           {timestamp}

@@ -13,6 +13,7 @@ export const sendMessage = async (prompt: string, file?: File): Promise<ServiceR
     const response = await fetch(getBackendUrl('/route'), {
       method: 'POST',
       body: formData,
+      credentials: 'include',
     });
 
     if (!response.ok) {

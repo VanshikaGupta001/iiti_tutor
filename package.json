@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@types/node": "^24.0.4",
+    "katex": "^0.16.22",
     "lovable-tagger": "^1.1.8",
     "lucide-react": "^0.344.0",
     "react": "^18.3.1",
