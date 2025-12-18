@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+python-multipart
+motor
+#pymongo
+# torch --index-url https://download.pytorch.org/whl/cpu
+# sentence-transformers
+faiss-cpu
+numpy
+openai
+httpx
+pdf2image
+pytesseract
+Pillow
+reportlab
+psutil
+huggingface_hub
