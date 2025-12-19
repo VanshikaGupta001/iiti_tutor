@@ -1,4 +1,5 @@
 fastapi
+uvicorn
 uvicorn[standard]
 python-multipart
 motor
@@ -10,8 +11,10 @@ numpy
 openai
 httpx
 pdf2image
+pypdf
 pytesseract
 Pillow
 reportlab
 psutil
 huggingface_hub
+python-dotenv
