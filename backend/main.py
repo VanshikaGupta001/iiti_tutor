@@ -1,23 +1,20 @@
 import os
 import json
-import re
-import datetime
 import asyncio
-import io
 import shutil
 import tempfile
 import uuid
-import psutil
-import gc
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List
+import base64
+import io
+from typing import Optional
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import motor.motor_asyncio
 from fastapi import FastAPI, File, UploadFile, Form, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from pdf2image import convert_from_path
@@ -27,11 +24,15 @@ import faiss
 import numpy as np
 from datetime import datetime, timezone
 from huggingface_hub import InferenceClient
+from pypdf import PdfReader
 
 
-def print_memory_usage(tag=""):
-    process = psutil.Process(os.getpid())
-    print(f"[MEMORY {tag}] Used: {process.memory_info().rss / 1024**2:.2f} MB")
+MONGO_URI = os.getenv("MONGO_URI")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 class ChatHistoryManager:
@@ -40,419 +41,478 @@ class ChatHistoryManager:
         self.db = self.client["IITI_Tutor_DB"]
         self.collection = self.db["chat_history"]
 
-    async def save_message(self, user_id: str, conversation_id: str, role: str, message_content: str):
-        message = {
+    async def save_message(self, user_id, conversation_id, role, content):
+        msg = {
             "user_id": user_id,
             "conversation_id": conversation_id,
             "role": role,
-            "content": message_content,
+            "content": content,
             "timestamp": datetime.now(timezone.utc)
         }
         try:
-            await self.collection.insert_one(message)
+            await self.collection.insert_one(msg)
         except Exception as e:
-            print(f"Database save error: {str(e)}")
+            print(f"DB Error: {e}")
 
-    async def load_history(self, user_id: str, conversation_id: str, limit: int = 5) -> list[dict]:
+    async def load_history(self, user_id, conversation_id, limit=6):
         try:
             cursor = self.collection.find(
                 {"user_id": user_id, "conversation_id": conversation_id},
-                projection={"role": 1, "content": 1, "_id": 0}
+                {"role": 1, "content": 1, "_id": 0}
             ).sort("timestamp", -1).limit(limit)
             history = [doc async for doc in cursor]
             return history[::-1]
-        except Exception as e:
-            print(f"Error loading history: {e}")
+        except:
             return []
 
-class QueryBot:
+
+class BaseLLMBot:
     def __init__(self):
-        self.HF_TOKEN = os.getenv("HF_TOKEN")
-        self.GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        self.MODEL_NAME = "llama-3.1-8b-instant"
-        self.GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-        self.EMBEDDING_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
-        self.hf_client = InferenceClient(token=self.HF_TOKEN)
-        
+        self.headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+
+    async def call_groq(self, messages, model="llama-3.1-8b-instant", temp=0.7):
+        payload = {"model": model, "messages": messages, "temperature": temp}
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(GROQ_API_URL, headers=self.headers, json=payload, timeout=60)
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"LLM Error: {e}")
+            return "I'm having trouble connecting to my brain right now. Please try again."
+
+
+
+class QueryBot(BaseLLMBot):
+    """
+    Handles:
+    1. General academic queries (RAG).
+    2. 'Tutor' mode (Interactive teaching).
+    """
+    def __init__(self):
+        super().__init__()
+        self.hf_client = InferenceClient(token=HF_TOKEN)
         self.chunks = []
         self.metadata = []
         self.index = None
         self.is_ready = False
 
     async def initialize_data(self):
-        """Loads data in background"""
+        """Loads curriculum data from MongoDB in background"""
         try:
-            print("🚀 [Background] Loading Course Data...")
-            self.chunks, self.metadata = await self.load_course_chunks()
-            
-            if self.chunks:
-                print(f"⏳ [Background] Generating Embeddings for {len(self.chunks)} chunks...")
-                loop = asyncio.get_event_loop()
-                embeddings_list = []
-                
-                # Manual batching
-                batch_size = 20
-                for i in range(0, len(self.chunks), batch_size):
-                    batch = self.chunks[i:i+batch_size]
-                    try:
-                        task = loop.run_in_executor(None, lambda b=batch: self.hf_client.feature_extraction(b, model=self.EMBEDDING_MODEL_ID))
-                        batch_resp = await task
-                        
-                        batch_arr = np.array(batch_resp)
-                        if len(batch_arr.shape) == 3:
-                            batch_emb = np.mean(batch_arr, axis=1)
-                        else:
-                            batch_emb = batch_arr
-                        embeddings_list.append(batch_emb)
-                    except Exception as e:
-                        print(f"Batch error: {e}")
-
-                if embeddings_list:
-                    final_embeddings = np.concatenate(embeddings_list, axis=0)
-                    self.index = faiss.IndexFlatL2(final_embeddings.shape[1])
-                    self.index.add(final_embeddings)
-                    self.is_ready = True
-                    print(f"[Background] FAISS Index Ready.")
-                else:
-                    print(" No embeddings generated.")
-            else:
-                print(" No course data found.")
+            print(" [Background] Loading Course Data...")
+            if not MONGO_URI:
+                print(" MONGO_URI not set. Skipping DB load.")
                 self.is_ready = True
-        except Exception as e:
-            print(f"Background Initialization Failed: {e}")
-            self.is_ready = True
+                return
 
-    async def load_course_chunks(self):
-        try:
             db = mongo_client["IITI_Tutor_DB"]
             collection = db["First_Year_Curriculum"]
             cursor = collection.find({})
             raw_courses = await cursor.to_list(length=None)
-        except Exception as e:
-            print(f"MongoDB connection failed: {e}")
-            raw_courses = []
-
-        chunks = []
-        metadata = []
-
-        for course in raw_courses:
-            code = course.get("Course Code", "")
-            title = course.get("Course Title", course.get("Title", ""))
-            full_text = f"{code}\n{title}\n"
-            for k, v in course.items():
-                if k == "_id": continue
-                if isinstance(v, (list, dict)):
-                    full_text += f"\n{k}: {json.dumps(v)}"
-                else:
-                    full_text += f"\n{k}: {v}"
-
-            for paragraph in full_text.split("\n\n"):
-                if len(paragraph.strip()) > 50:
-                    chunks.append(paragraph.strip())
-                    metadata.append({"course": code, "title": title})
-
-        return chunks, metadata
-
-    async def retrieve_relevant_chunks(self, query, top_k=4, chat_history=None):
-        if not self.is_ready or not self.index:
-            return []
             
-        try:
-            # if query is vague make it look at history
-            search_query = query
-            if chat_history and len(chat_history) > 0:
-                last_user_msg = next((msg['content'] for msg in reversed(chat_history) if msg['role'] == 'user'), None)
+            self.chunks = []
+            self.metadata = []
+            
+            # Create search chunks from DB data
+            for course in raw_courses:
+                # Combine relevant fields into a text block
+                text_block = f"Course: {course.get('Course Code','')} - {course.get('Course Title','')}\n"
+                for k, v in course.items():
+                    if k not in ["_id", "Course Code", "Course Title"]:
+                        text_block += f"{k}: {v}\n"
                 
-                if last_user_msg:
-                    print(f"🔗 Enhancing query with history: {last_user_msg[:20]}...")
-                    search_query = f"{last_user_msg} {query}"
+                # Split large blocks if necessary (simple char split for now)
+                if len(text_block) > 50:
+                    self.chunks.append(text_block[:1500]) # Limit chunk size
+                    self.metadata.append({"title": course.get("Course Title", "Unknown")})
 
-            loop = asyncio.get_event_loop()
-            query_emb = await loop.run_in_executor(
-                None, 
-                lambda: self.hf_client.feature_extraction(search_query, model=self.EMBEDDING_MODEL_ID)
-            )
-            query_vec = np.array(query_emb)
-            if len(query_vec.shape) > 1:
-                query_vec = np.mean(query_vec, axis=0)
-            query_vec = query_vec.reshape(1, -1)
-            
-            D, I = self.index.search(query_vec, top_k)
-            return [(self.chunks[i], self.metadata[i]) for i in I[0] if i < len(self.chunks)]
+            if self.chunks:
+                print(f"⏳ Generating Embeddings for {len(self.chunks)} chunks...")
+                loop = asyncio.get_event_loop()
+                
+                # Generate embeddings in batches
+                embeddings = []
+                batch_size = 20
+                for i in range(0, len(self.chunks), batch_size):
+                    batch = self.chunks[i:i+batch_size]
+                    try:
+                        res = await loop.run_in_executor(None, lambda b=batch: self.hf_client.feature_extraction(b, model=EMBEDDING_MODEL))
+                        arr = np.array(res)
+                        if len(arr.shape) == 3: arr = np.mean(arr, axis=1)
+                        embeddings.append(arr)
+                    except Exception as e:
+                        print(f"Embedding Batch Error: {e}")
+
+                if embeddings:
+                    final_emb = np.concatenate(embeddings, axis=0)
+                    self.index = faiss.IndexFlatL2(final_emb.shape[1])
+                    self.index.add(final_emb)
+                    self.is_ready = True
+                    print(" RAG System Ready.")
+            else:
+                print(" No course data found in DB.")
+                self.is_ready = True
         except Exception as e:
-            print(f"Error retrieving chunks: {e}")
+            print(f" RAG Init Failed: {e}")
+            self.is_ready = True
+
+    async def retrieve(self, query, top_k=4):
+        if not self.is_ready or not self.index: return []
+        try:
+            loop = asyncio.get_event_loop()
+            q_emb = await loop.run_in_executor(None, lambda: self.hf_client.feature_extraction(query, model=EMBEDDING_MODEL))
+            q_vec = np.array(q_emb)
+            if len(q_vec.shape) > 1: q_vec = np.mean(q_vec, axis=0)
+            q_vec = q_vec.reshape(1, -1)
+            
+            D, I = self.index.search(q_vec, top_k)
+            return [self.chunks[i] for i in I[0] if i < len(self.chunks)]
+        except Exception as e:
+            print(f"Retrieval Error: {e}")
             return []
 
-    async def query_llama(self, query, context_chunks, chat_history: list = None):
-        if not self.is_ready:
-             return {"text": "System is still warming up (loading course data). Please try again in 30 seconds.", "pdf_file": None}
-
-        context = "\n\n".join(f"Chunk: {chunk}" for chunk, meta in context_chunks)
-        messages = [{"role": "system", "content": "You are a helpful academic assistant."}]
+    async def answer(self, query, history, mode="query"):
+        if not self.is_ready: return " System is still warming up. Please try again in 30 seconds."
         
-        # Pass full history to LLM to know conversation flow
-        if chat_history:
-            messages.extend(chat_history)
-            
-        messages.append({"role": "user", "content": f"Context Information:\n{context}\n\nUser Question: {query}"})
-
-        payload = {
-            "model": self.MODEL_NAME,
-            "messages": messages,
-            "temperature": 0.2,
-        }
-        headers = {"Authorization": f"Bearer {self.GROQ_API_KEY}", "Content-Type": "application/json"}
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(self.GROQ_API_URL, headers=headers, json=payload, timeout=20)
-            response.raise_for_status()
-            return {"text": response.json()["choices"][0]["message"]["content"].strip(), "pdf_file": None}
+        # Retrieve context from curriculum
+        relevant_text = await self.retrieve(query)
+        context = "\n\n".join(relevant_text)
         
+        if mode == "tutor":
+            sys_prompt = (
+                "You are 'Professor Nexus', an expert, patient AI Tutor. "
+                "Do NOT just give the answer. TEACH the concept. "
+                "1. Use analogies and simple real-world examples. "
+                "2. Break complex topics into steps. "
+                "3. Ask a checking question at the end to ensure the student understood."
+            )
+        else:
+            sys_prompt = "You are a helpful academic assistant for IIT Indore. Answer based on the context provided."
 
-class QuestionPaperBot:
-    def __init__(self):
-        self.api_key = os.getenv("GROQ_API_KEY")
-
-    async def pdf_to_images(self, pdf_path, temp_dir):
-        # Only used if the file is actually a PDF
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as pool:
-            images = await loop.run_in_executor(pool, convert_from_path, pdf_path, 300)
-            image_paths = []
-            for i, page in enumerate(images):
-                path = os.path.join(temp_dir, f"Page_{i+1}.jpg")
-                page.save(path, "JPEG")
-                image_paths.append(path)
-            return image_paths
-
-    async def extract_text(self, image_paths):
-        loop = asyncio.get_event_loop()
-        async def process_image(path):
-            return await loop.run_in_executor(None, lambda: pytesseract.image_to_string(Image.open(path)))
+        msgs = [{"role": "system", "content": sys_prompt}]
+        if history: msgs.extend(history)
+        msgs.append({"role": "user", "content": f"Context Info:\n{context}\n\nUser Query: {query}"})
         
-        tasks = [process_image(path) for path in image_paths]
-        texts = await asyncio.gather(*tasks)
-        return "\n".join(texts)
+        return await self.call_groq(msgs)
 
-    async def generate_text_via_llm(self, prompt):
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 2048
-        }
-        async with httpx.AsyncClient() as client:
-            response = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"].strip()
+class BookBot(BaseLLMBot):
+    """
+    Handles:
+    1. Reading uploaded PDF books.
+    2. Answering questions specific to that book.
+    """
+    async def process_book(self, file_path, query):
+        text = ""
+        try:
+            reader = PdfReader(file_path)
+            # Limit pages for performance (since using free tier) sed lyf
+            max_pages = 50 
+            for i, page in enumerate(reader.pages[:max_pages]):
+                extracted = page.extract_text()
+                if extracted: text += extracted + "\n"
+        except Exception as e:
+            return f" Error reading PDF: {e}"
 
-    def text_to_formatted_pdf(self, text):
+        if len(text.strip()) < 50: 
+            return " The PDF seems to be empty or contains scanned images without text. Please try uploading a text-based PDF or use the 'Solve' feature for images."
+
+        prompt = f"""You are analyzing a book uploaded by the user.
+        
+        BOOK CONTENT (First {max_pages} pages):
+        {text[:25000]} 
+        ... [Content Truncated] ...
+        
+        User Query: {query}
+        
+        Answer specifically based on the book content above. If the answer isn't there, say so."""
+
+        msgs = [{"role": "user", "content": prompt}]
+        return await self.call_groq(msgs, model="llama-3.1-8b-instant")
+
+class QuestionPaperBot(BaseLLMBot):
+    """
+    Handles:
+    1. Solving uploaded papers (Image or PDF).
+    2. Generating NEW papers from uploaded books/notes.
+    """
+    async def extract_text_smart(self, file_path):
+        """Smart extraction: Tries text-layer first, falls back to OCR."""
+        text = ""
+        ext = os.path.splitext(file_path)[1].lower()
+
+        # Fast Text Extraction (PDFs)
+        if ext == ".pdf":
+            try:
+                reader = PdfReader(file_path)
+                for page in reader.pages[:20]: # Check first 20 pages
+                    t = page.extract_text()
+                    if t: text += t + "\n"
+            except: pass
+        
+        # OCR (Images or Scanned PDFs)
+        if len(text.strip()) < 100: # If text layer failed or is an image
+            try:
+                if ext == ".pdf":
+                    with ThreadPoolExecutor() as pool:
+                        images = convert_from_path(file_path, 300)
+                        # OCR only first 5 pages to save time/resources
+                        ocr_texts = [pytesseract.image_to_string(img) for img in images[:5]]
+                        text = "\n".join(ocr_texts)
+                else: # Image file
+                    text = pytesseract.image_to_string(Image.open(file_path))
+            except Exception as e:
+                print(f"OCR Error: {e}")
+        
+        return text
+
+    async def process_file(self, file_path, mode="answer"):
+        
+        raw_text = await self.extract_text_smart(file_path)
+
+        if not raw_text or len(raw_text.strip()) < 10: 
+            return {"text": " I could not read any text from the file. It might be blurry or password protected.", "pdf_file": None}
+
+        if mode == "generate":
+            prompt = f"""Using the content below, generate a NEW Question Paper.
+            - Create 3 Sections (A, B, C).
+            - Include marks for each question.
+            - Content Source:
+            {raw_text[:15000]}
+            """
+            model = "llama-3.3-70b-versatile"
+        else:
+            prompt = f"""Provide detailed, step-by-step SOLUTIONS for the questions found in this text:
+            {raw_text[:15000]}
+            """
+            model = "llama-3.3-70b-versatile"
+
+        generated_text = await self.call_groq([{"role": "user", "content": prompt}], model=model)
+        
         buffer = io.BytesIO()
         c = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
         y = height - 50
-        lines = text.split('\n')
-        for line in lines:
-            if y < 50:
+        
+        c.setFont("Helvetica", 11)
+        for line in generated_text.split('\n'):
+            if y < 50: 
                 c.showPage()
                 y = height - 50
-            # Simple wrapping logic
-            if len(line) > 90:
-                chunks = [line[i:i+90] for i in range(0, len(line), 90)]
-                for chunk in chunks:
-                    c.drawString(50, y, chunk)
-                    y -= 14
-            else:
-                c.drawString(50, y, line)
-                y -= 14
+                c.setFont("Helvetica", 11)
+            
+            # Basic text wrapping
+            words = line.split()
+            current_line = ""
+            for word in words:
+                if c.stringWidth(current_line + word) < (width - 100):
+                    current_line += word + " "
+                else:
+                    c.drawString(50, y, current_line)
+                    y -= 15
+                    current_line = word + " "
+            c.drawString(50, y, current_line)
+            y -= 15
+            
         c.save()
         buffer.seek(0)
-        return {"text": text, "pdf_file": buffer}
-
-    async def process_file(self, file_path, mode="answer"):
-        """Smart processor that handles both PDF and Images"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            file_ext = os.path.splitext(file_path)[1].lower()
-            
-            if file_ext == ".pdf":
-                print("Processing PDF...")
-                image_paths = await self.pdf_to_images(file_path, temp_dir)
-            elif file_ext in [".jpg", ".jpeg", ".png", ".webp"]:
-                print("Processing Image...")
-                image_paths = [file_path]
-            else:
-                return {"text": f"Unsupported file format: {file_ext}. Please upload a PDF or Image.", "pdf_file": None}
-
-            raw_text = await self.extract_text(image_paths)
-            
-            # Debug: Check if text was actually found
-            if not raw_text or len(raw_text.strip()) < 5:
-                return {"text": "I could not read any text from the image. Please ensure the image is clear and contains readable text.", "pdf_file": None}
-
-            # Generate Answer
-            if mode == "answer":
-                prompt = f"""You are an expert tutor. 
-                The user has provided an image/document with a question.
-                
-                EXTRACTED TEXT:
-                {raw_text}
-                
-                TASK:
-                1. Identify the question(s).
-                2. Provide a clear, step-by-step solution.
-                """
-            else:
-                prompt = f"Generate a similar question paper based on:\n{raw_text}"
-                
-            generated_text = await self.generate_text_via_llm(prompt)
-            return self.text_to_formatted_pdf(generated_text)
-
-class Scheduler:
-    def __init__(self):
-        self.GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        self.MODEL_NAME = "llama-3.1-8b-instant"
-        self.GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-
-    async def run_scheduler(self, initial_prompt: str):
-        prompt = f"Create a daily schedule for: {initial_prompt}"
-        headers = {"Authorization": f"Bearer {self.GROQ_API_KEY}"}
-        payload = {
-            "model": self.MODEL_NAME,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7
-        }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(self.GROQ_API_URL, headers=headers, json=payload, timeout=30)
-            return {"text": response.json()["choices"][0]["message"]["content"].strip(), "pdf_file": None}
-
-class RouterAgent:
-    def __init__(self, chat_history_manager):
-        self.api_key = os.getenv("GROQ_API_KEY")
-        self.chat_history_manager = chat_history_manager
-
-    async def classify_prompt(self, user_prompt: str) -> str:
-        headers = {"Authorization": f"Bearer {self.api_key}"}
-        prompt = f"""Classify into one: questionpaper, scheduler, or query.
-        User Input: {user_prompt}
-        Output (one word only):"""
         
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 10
-        }
+        return {"text": generated_text, "pdf_file": buffer}
+
+class SchedulerBot(BaseLLMBot):
+    """Creates Study Schedules"""
+    async def create_schedule(self, prompt):
+        msg = [{"role": "user", "content": f"Create a structured, realistic daily study schedule based on this request: {prompt}"}]
+        return await self.call_groq(msg)
+
+
+class RouterAgent(BaseLLMBot):
+    def __init__(self, history_manager):
+        super().__init__()
+        self.history = history_manager
+        self.rag = QueryBot()
+        self.book = BookBot()
+        self.qp = QuestionPaperBot()
+        self.sched = SchedulerBot()
+
+    async def classify_intent(self, prompt, has_file):
+        """Decides which bot to use based on prompt content and file presence."""
+        system_msg = f"""Classify the user intent into exactly one category.
+        
+        Context:
+        - File Uploaded: {has_file}
+        
+        Categories:
+        1. 'tutor': User wants to learn concepts ("teach me", "explain", "how does x work").
+        2. 'book': User asks about an uploaded book ("summarize this", "what does chapter 1 say").
+        3. 'solve': User wants answers to an uploaded paper ("solve this", "solution", "answer key").
+        4. 'generate': User wants a NEW paper created ("create a mock test", "generate questions from this book").
+        5. 'schedule': User wants a plan ("timetable", "study plan", "schedule").
+        6. 'query': General curriculum questions if no file is present.
+        
+        User Input: "{prompt}"
+        
+        Output (ONE WORD ONLY):"""
+        
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload)
-                content = response.json()["choices"][0]["message"]["content"].strip().lower()
-                if "question" in content: return "questionpaper"
-                if "sched" in content: return "scheduler"
-                return "query"
+            category = await self.call_groq([{"role": "user", "content": system_msg}], model="llama-3.1-8b-instant", temp=0.1)
+            category = category.lower().strip()
+            valid_cats = ["tutor", "book", "solve", "generate", "schedule", "query"]
+            return category if category in valid_cats else "query"
         except:
             return "query"
 
-    async def route(self, user_prompt: str, user_id: str, conversation_id: str, file=None):
-        query_type = await self.classify_prompt(user_prompt)
-        await self.chat_history_manager.save_message(user_id, conversation_id, "user", user_prompt)
-        chat_history = await self.chat_history_manager.load_history(user_id, conversation_id)
-
-        result = None
+    async def route(self, prompt, file_path, user_id, convo_id):
+        has_file = file_path is not None
+        intent = await self.classify_intent(prompt, has_file)
         
-        if query_type == "questionpaper":
-            qp_bot = QuestionPaperBot()
-            mode = "generate" if "generate" in user_prompt.lower() else "answer"
-            try:
-                result = await qp_bot.process_file(file, mode=mode)
-            except Exception as e:
-                print(f"Error processing paper: {e}")
-                return {"text": f" Failed to process the file. Error: {str(e)}", "pdf_file": None}
+        print(f" Intent Detected: '{intent}' (File: {has_file})")
+        
+      
+        await self.history.save_message(user_id, convo_id, "user", prompt)
+        history = await self.history.load_history(user_id, convo_id)
+
+        response_text = ""
+        pdf_output = None
 
         
-        elif query_type == "scheduler":
-            sch_bot = Scheduler()
-            result = await sch_bot.run_scheduler(user_prompt)
+
+        if intent == "book":
+            if has_file:
+                response_text = await self.book.process_book(file_path, prompt)
+            else:
+                response_text = " You asked to analyze a book, but didn't upload one. Please upload a PDF."
+
+       
+        elif intent in ["solve", "generate"]:
+            if has_file:
+                # This handles "Create a paper from this book" (generate) OR "Solve this image" (solve)
+                result = await self.qp.process_file(file_path, mode=intent)
+                response_text = result["text"]
+                pdf_output = result["pdf_file"]
+            elif intent == "generate":
+                # Generate from RAG (No file)
+                response_text = await self.rag.answer(f"Generate a question paper for: {prompt}", history, mode="query")
+            else:
+                response_text = " Please upload a file (PDF/Image) to solve."
+
+        #SCHEDULE
+        elif intent == "schedule":
+            response_text = await self.sched.create_schedule(prompt)
+
+        #TUTOR MODE
+        elif intent == "tutor":
+            response_text = await self.rag.answer(prompt, history, mode="tutor")
+
+        #GENERAL QUERY (Default)
         else:
-            if not global_query_bot.is_ready:
-                 return {"text": " System is still loading course data. Please try again in 30 seconds.", "pdf_file": None}
-                 
-            relevant_chunks = await global_query_bot.retrieve_relevant_chunks(user_prompt, chat_history=chat_history)
-            result = await global_query_bot.query_llama(user_prompt, relevant_chunks, chat_history=chat_history)
+            response_text = await self.rag.answer(prompt, history, mode="query")
 
-        if result and result.get("text"):
-            await self.chat_history_manager.save_message(user_id, conversation_id, "assistant", result["text"])
-        return result
+        # Save Assistant Response
+        await self.history.save_message(user_id, convo_id, "assistant", response_text)
+        
+        return {"text": response_text, "pdf_file": pdf_output}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Application Startup")
+    print(" Nexus Backend Starting...")
+    global mongo_client, router
     
-    global mongo_client, chat_history_manager, global_query_bot, router_agent
+
+    if MONGO_URI:
+        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+        chat_manager = ChatHistoryManager(mongo_client)
+    else:
+        print(" No Mongo URI. DB disabled.")
+        chat_manager = None 
+
+    router = RouterAgent(chat_manager)
     
-    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(os.getenv("MONGO_URI"))
-    chat_history_manager = ChatHistoryManager(mongo_client)
-    
-    global_query_bot = QueryBot()
-    router_agent = RouterAgent(chat_history_manager)
-    
-    # Schedule data loading in background so startup doesn't timeout
-    asyncio.create_task(global_query_bot.initialize_data())
+    asyncio.create_task(router.rag.initialize_data())
     
     yield
-    print("Application Shutdown")
-    mongo_client.close()
+    print("Nexus Backend Shutting Down...")
+    if MONGO_URI: mongo_client.close()
 
 app = FastAPI(lifespan=lifespan)
-# app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# CORS Setup
 origins = [
-    "http://localhost:5173",                 # Localhost for testing
-    "http://localhost:3000",                 # Alternative localhost
-    "https://iiti-tutor-frontend.vercel.app",#specific Vercel domain
-    "https://iiti-tutor.vercel.app"          #Production Vercel domain 
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://iiti-tutor-frontend.vercel.app",
+    "https://iiti-tutor.vercel.app"
 ]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/route")
-async def route_handler(request: Request, response: Response, prompt: str = Form(...), file: Optional[UploadFile] = File(None)):
-    temp_file_path = None
+async def route_handler(
+    request: Request,
+    prompt: str = Form(...),
+    file: Optional[UploadFile] = File(None)
+):
+    """
+    Unified Endpoint:
+    - Accepts 'prompt' and optional 'file'.
+    - Routes intelligently.
+    - Returns JSON with 'text' and optional 'file_base64'.
+    """
+    temp_path = None
+    
     if file:
-        file_ext = os.path.splitext(file.filename)[1]
-        if not file_ext: file_ext = ".pdf" 
+        # Preserve extension for detection (pdf vs image)
+        ext = os.path.splitext(file.filename)[1]
+        if not ext: ext = ".pdf"
         
-        fd, temp_file_path = tempfile.mkstemp(suffix=file_ext)
+        fd, temp_path = tempfile.mkstemp(suffix=ext)
         os.close(fd)
-        with open(temp_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        with open(temp_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
 
-    current_user_id = request.cookies.get("user_id") or str(uuid.uuid4())
-    current_conversation_id = request.cookies.get("convo_id") or str(uuid.uuid4())
+    # Manage Cookies
+    user_id = request.cookies.get("user_id") or str(uuid.uuid4())
+    convo_id = request.cookies.get("convo_id") or str(uuid.uuid4())
 
     try:
-        result = await router_agent.route(prompt, current_user_id, current_conversation_id, temp_file_path)
+        result = await router.route(prompt, temp_path, user_id, convo_id)
+        
+        # Prepare Response
+        resp_data = {"text": result["text"]}
+        
+        # Encode PDF if generated
+        if result["pdf_file"]:
+            result["pdf_file"].seek(0)
+            b64_data = base64.b64encode(result["pdf_file"].read()).decode('utf-8')
+            resp_data["file_base64"] = b64_data
+            resp_data["mime_type"] = "application/pdf"
+            resp_data["filename"] = "Nexus_Solution.pdf"
+
+        # Return JSON
+        response = JSONResponse(resp_data)
+        response.set_cookie("user_id", user_id, secure=True, samesite="None")
+        response.set_cookie("convo_id", convo_id, secure=True, samesite="None")
+        return response
+
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        print(f"Server Error: {e}")
+        return JSONResponse({"text": f"Server Error: {str(e)}"}, status_code=500)
     finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-
-    text = result.get("text", "")
-    pdf_file = result.get("pdf_file", None)
-
-    if pdf_file:
-        pdf_file.seek(0)
-        return StreamingResponse(pdf_file, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=response.pdf"})
-
-    resp = JSONResponse(content={"text": text})
-    resp.set_cookie(key="user_id", value=current_user_id, samesite="None", secure=True)
-    resp.set_cookie(key="convo_id", value=current_conversation_id, samesite="None", secure=True)
-    return resp
+        # Cleanup Temp File
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
 
 @app.get("/")
 async def health_check():
-    status = "ready" if global_query_bot.is_ready else "initializing"
-    return {"status": status, "message": "IITI Tutor Backend is Live"}
+    status = "ready" if router.rag.is_ready else "loading_data"
+    return {"status": status, "msg": "Nexus AI is Live"}
 
 if __name__ == "__main__":
     import uvicorn

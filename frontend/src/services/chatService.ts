@@ -10,6 +10,7 @@ export const sendMessage = async (prompt: string, file?: File): Promise<ServiceR
       formData.append('file', file);
     }
 
+    // 1. Send Request
     const response = await fetch(getBackendUrl('/route'), {
       method: 'POST',
       body: formData,
@@ -20,46 +21,41 @@ export const sendMessage = async (prompt: string, file?: File): Promise<ServiceR
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    const contentType = response.headers.get('content-type');
+    // 2. Parse JSON (Backend now ALWAYS returns JSON)
+    const data = await response.json();
+    
+    let fileBlob: Blob | null = null;
 
-    if (contentType && contentType.includes('multipart/mixed')) {
-      const boundary = contentType.split('boundary=')[1];
-      const text = await response.text();
-      const parts = text.split(`--${boundary}`).filter(part => part.trim() && !part.startsWith('--'));
-
-      let textResult: string | null = null;
-      let fileBlob: Blob | null = null;
-
-      for (const part of parts) {
-        const [header, body] = part.split('\r\n\r\n', 2);
-        if (!header || !body) continue;
-
-        if (header.includes('application/json')) {
-          try {
-            const jsonData = JSON.parse(body);
-            textResult = jsonData.text || jsonData.message || null;
-          } catch (e) {
-            console.error('Error parsing JSON part:', e);
-          }
-        } else if (header.includes('application/pdf')) {
-          try {
-            const pdfArrayBuffer = new TextEncoder().encode(body).buffer;
-            fileBlob = new Blob([pdfArrayBuffer], { type: 'application/pdf' });
-          } catch (e) {
-            console.error('Error processing PDF part:', e);
-          }
+    // 3. Check for File (Base64)
+    // The new backend sends 'file_base64' and 'mime_type'
+    if (data.file_base64) {
+      try {
+        // Convert Base64 string -> Binary Blob
+        const byteCharacters = atob(data.file_base64);
+        const byteNumbers = new Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
         }
+        const byteArray = new Uint8Array(byteNumbers);
+        
+        // Use the dynamic mime type from backend (or default to PDF)
+        const mimeType = data.mime_type || 'application/pdf';
+        fileBlob = new Blob([byteArray], { type: mimeType });
+
+        // Hack: Attach filename to the blob so UI can read it for download
+        (fileBlob as any).name = data.filename || "Nexus_Output.pdf";
+        
+      } catch (e) {
+        console.error('Error processing file from backend:', e);
       }
-
-      return { text: textResult, file: fileBlob };
     }
 
-    if (contentType && contentType.includes('application/json')) {
-      const data = await response.json();
-      return { text: data.text || data.message || null, file: null };
-    }
+    // 4. Return Clean Result
+    return { 
+      text: data.text || "Here is the response.", 
+      file: fileBlob 
+    };
 
-    return { text: 'Unexpected response format.', file: null };
   } catch (error) {
     console.error('Error sending message:', error);
     throw new Error('Failed to send message. Please check backend status.');
