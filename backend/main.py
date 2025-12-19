@@ -26,7 +26,8 @@ from PIL import Image
 import faiss
 import numpy as np
 from datetime import datetime, timezone
-from huggingface_hub import InferenceClient 
+from huggingface_hub import InferenceClient
+
 
 def print_memory_usage(tag=""):
     process = psutil.Process(os.getpid())
@@ -66,72 +67,59 @@ class ChatHistoryManager:
 
 class QueryBot:
     def __init__(self):
-        # API Keys
         self.HF_TOKEN = os.getenv("HF_TOKEN")
         self.GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        
         self.MODEL_NAME = "llama-3.1-8b-instant"
         self.GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
         self.EMBEDDING_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
-        
         self.hf_client = InferenceClient(token=self.HF_TOKEN)
         
-        # Data storage
         self.chunks = []
         self.metadata = []
         self.index = None
+        self.is_ready = False  
 
     async def initialize_data(self):
-        """Loads data and builds index using API embeddings"""
-        print("Loading Course Data...")
-        self.chunks, self.metadata = await self.load_course_chunks()
-        
-        if self.chunks:
-            print(f"Generating Embeddings for {len(self.chunks)} chunks via HuggingFace API...")
+        """Loads data in background"""
+        try:
+            print("[Background] Loading Course Data...")
+            self.chunks, self.metadata = await self.load_course_chunks()
             
-            loop = asyncio.get_event_loop()
-            try:
+            if self.chunks:
+                print(f"[Background] Generating Embeddings for {len(self.chunks)} chunks...")
+                loop = asyncio.get_event_loop()
                 embeddings_list = []
                 
-                def get_embedding_sync(text):
-                    try:
-                        resp = self.hf_client.feature_extraction(text, model=self.EMBEDDING_MODEL_ID)
-                        arr = np.array(resp)
-                        if len(arr.shape) > 1:
-                            return np.mean(arr, axis=0)
-                        return arr
-                    except Exception as e:
-                        print(f"Embedding error: {e}")
-                        return np.zeros(384) 
-
                 batch_size = 20
                 for i in range(0, len(self.chunks), batch_size):
                     batch = self.chunks[i:i+batch_size]
-                    task = loop.run_in_executor(None, lambda b=batch: self.hf_client.feature_extraction(b, model=self.EMBEDDING_MODEL_ID))
-                    batch_resp = await task
-                    
-                    batch_arr = np.array(batch_resp)
-                    if len(batch_arr.shape) == 3:
-                        batch_emb = np.mean(batch_arr, axis=1)
-                    else:
-                        batch_emb = batch_arr
+                    try:
+                        task = loop.run_in_executor(None, lambda b=batch: self.hf_client.feature_extraction(b, model=self.EMBEDDING_MODEL_ID))
+                        batch_resp = await task
                         
-                    embeddings_list.append(batch_emb)
-                    print(f"Processed batch {i // batch_size + 1}")
+                        batch_arr = np.array(batch_resp)
+                        if len(batch_arr.shape) == 3:
+                            batch_emb = np.mean(batch_arr, axis=1)
+                        else:
+                            batch_emb = batch_arr
+                        embeddings_list.append(batch_emb)
+                    except Exception as e:
+                        print(f"Batch error: {e}")
 
                 if embeddings_list:
                     final_embeddings = np.concatenate(embeddings_list, axis=0)
                     self.index = faiss.IndexFlatL2(final_embeddings.shape[1])
                     self.index.add(final_embeddings)
-                    print(f" FAISS Index built via API.")
+                    self.is_ready = True
+                    print(f"[Background] FAISS Index Ready.")
                 else:
                     print("No embeddings generated.")
-
-            except Exception as e:
-                print(f"Failed to generate embeddings: {e}")
-                self.index = None
-        else:
-            print("No course data found.")
+            else:
+                print("No course data found.")
+                self.is_ready = True 
+        except Exception as e:
+            print(f" Background Initialization Failed: {e}")
+            self.is_ready = True 
 
     async def load_course_chunks(self):
         try:
@@ -139,7 +127,6 @@ class QueryBot:
             collection = db["First_Year_Curriculum"]
             cursor = collection.find({})
             raw_courses = await cursor.to_list(length=None)
-            print(f"Found {len(raw_courses)} courses in database")
         except Exception as e:
             print(f"MongoDB connection failed: {e}")
             raw_courses = []
@@ -151,8 +138,6 @@ class QueryBot:
             code = course.get("Course Code", "")
             title = course.get("Course Title", course.get("Title", ""))
             full_text = f"{code}\n{title}\n"
-            
-            # Simple text extraction
             for k, v in course.items():
                 if k == "_id": continue
                 if isinstance(v, (list, dict)):
@@ -168,23 +153,20 @@ class QueryBot:
         return chunks, metadata
 
     async def retrieve_relevant_chunks(self, query, top_k=4, chat_history=None):
+        if not self.is_ready:
+            return []
         if not self.index:
             return []
             
         try:
             loop = asyncio.get_event_loop()
-            # Generate query embedding
             query_emb = await loop.run_in_executor(
                 None, 
                 lambda: self.hf_client.feature_extraction(query, model=self.EMBEDDING_MODEL_ID)
             )
-            
             query_vec = np.array(query_emb)
-            # Handle dimensions [seq, dim] -> [dim]
             if len(query_vec.shape) > 1:
                 query_vec = np.mean(query_vec, axis=0)
-            
-            # Reshape for FAISS [1, dim]
             query_vec = query_vec.reshape(1, -1)
             
             D, I = self.index.search(query_vec, top_k)
@@ -194,12 +176,14 @@ class QueryBot:
             return []
 
     async def query_llama(self, query, context_chunks, chat_history: list = None):
+        # Fallback if system is still loading
+        if not self.is_ready:
+             return {"text": "System is still warming up (loading course data). Please try again in 30 seconds.", "pdf_file": None}
+
         context = "\n\n".join(f"Chunk: {chunk}" for chunk, meta in context_chunks)
         messages = [{"role": "system", "content": "You are a helpful academic assistant."}]
-        
         if chat_history:
             messages.extend(chat_history)
-            
         messages.append({"role": "user", "content": f"{context}\n\nQuestion: {query}"})
 
         payload = {
@@ -207,10 +191,7 @@ class QueryBot:
             "messages": messages,
             "temperature": 0.2,
         }
-        headers = {
-            "Authorization": f"Bearer {self.GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {self.GROQ_API_KEY}", "Content-Type": "application/json"}
 
         async with httpx.AsyncClient() as client:
             response = await client.post(self.GROQ_API_URL, headers=headers, json=payload, timeout=20)
@@ -236,7 +217,6 @@ class QuestionPaperBot:
         loop = asyncio.get_event_loop()
         async def process_image(path):
             return await loop.run_in_executor(None, lambda: pytesseract.image_to_string(Image.open(path)))
-        
         tasks = [process_image(path) for path in image_paths]
         texts = await asyncio.gather(*tasks)
         return "\n".join(texts)
@@ -259,7 +239,6 @@ class QuestionPaperBot:
         c = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
         y = height - 50
-        
         lines = text.split('\n')
         for line in lines:
             if y < 50:
@@ -281,12 +260,10 @@ class QuestionPaperBot:
         with tempfile.TemporaryDirectory() as temp_dir:
             image_paths = await self.pdf_to_images(pdf_path, temp_dir)
             raw_text = await self.extract_text(image_paths)
-            
             if mode == "answer":
                 prompt = f"Provide solutions for:\n{raw_text}"
             else:
                 prompt = f"Generate a similar question paper based on:\n{raw_text}"
-                
             generated_text = await self.generate_text_via_llm(prompt)
             return self.text_to_formatted_pdf(generated_text)
 
@@ -318,7 +295,6 @@ class RouterAgent:
         prompt = f"""Classify into one: questionpaper, scheduler, or query.
         User Input: {user_prompt}
         Output (one word only):"""
-        
         payload = {
             "model": "llama-3.1-8b-instant",
             "messages": [{"role": "user", "content": prompt}],
@@ -355,27 +331,24 @@ class RouterAgent:
             await self.chat_history_manager.save_message(user_id, conversation_id, "assistant", result["text"])
         return result
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(" Application Startup")
+    print("Application Startup")
     
     global mongo_client, chat_history_manager, global_query_bot, router_agent
     
-    # 1. Mongo
     mongo_client = motor.motor_asyncio.AsyncIOMotorClient(os.getenv("MONGO_URI"))
-    
-    # 2. Managers
     chat_history_manager = ChatHistoryManager(mongo_client)
     
-    # 3. Query Bot (API Based - No RAM crash)
     global_query_bot = QueryBot()
-    await global_query_bot.initialize_data()
-    
-    # 4. Router
     router_agent = RouterAgent(chat_history_manager)
     
+    # Schedule data loading in background so startup doesn't timeout
+    asyncio.create_task(global_query_bot.initialize_data())
+    
     yield
-    print(" Application Shutdown")
+    print("Application Shutdown")
     mongo_client.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -412,6 +385,11 @@ async def route_handler(request: Request, response: Response, prompt: str = Form
     resp.set_cookie(key="user_id", value=current_user_id, samesite="None", secure=True)
     resp.set_cookie(key="convo_id", value=current_conversation_id, samesite="None", secure=True)
     return resp
+
+@app.get("/")
+async def health_check():
+    status = "ready" if global_query_bot.is_ready else "initializing"
+    return {"status": status, "message": "IITI Tutor Backend is Live"}
 
 if __name__ == "__main__":
     import uvicorn
