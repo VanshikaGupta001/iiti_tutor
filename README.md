@@ -17,50 +17,57 @@
 
 ---
 
-## 🚀 Key Features
+## Key Features
 
-### 1. 📚 Context-Aware AI Tutor (RAG)
+### 1. Context-Aware AI Tutor (RAG)
+
 * Answers queries based on the **official First Year Curriculum** stored in MongoDB.
-* Uses **Hugging Face Embeddings** and **FAISS** vector search to retrieve relevant course chunks.
-* Maintains conversation history for context-aware follow-up questions (e.g., asking for "reference books" after discussing a specific subject).
+* Uses **Hugging Face Embeddings** and **FAISS vector search** to retrieve relevant course chunks.
+* Maintains **conversation history** for context-aware follow-up questions (e.g., asking for *reference books* after discussing a subject).
 
-### 2. 📝 Intelligent Question Paper Bot
-* **Paper Solver:** Upload a PDF question paper; the bot uses **OCR (Tesseract)** to extract text and **Llama 3 (via Groq)** to generate detailed step-by-step solutions.
-* **Mock Paper Generator:** Generates new, similar question papers based on the structure and difficulty of an uploaded file or specific topics.
-* **Smart Routing:** Automatically detects if a file is present or if the user wants to generate a paper from scratch using RAG.
+### 2. Intelligent Question Paper Bot
 
-### 3. 📅 AI Study Scheduler
-* Creates structured, realistic daily or weekly study schedules.
+* **Paper Solver**: Upload a PDF question paper; the bot uses **OCR (Tesseract)** to extract text and **Llama 3 (via Groq)** to generate detailed, step-by-step solutions.
+* **Mock Paper Generator**: Generates new, similar question papers based on the structure and difficulty of an uploaded file or specific topics.
+* **Smart Routing**: Automatically detects whether a file is present or if the user wants to generate a paper from scratch using RAG.
+
+### 3. AI Study Scheduler
+
+* Creates structured, realistic **daily or weekly study schedules**.
 * Parses natural language requests (e.g., *"Plan a schedule for my Quantum Physics exam on Monday"*).
 
-### 4. 🧠 High-Performance Architecture
-* **Backend:** Asynchronous FastAPI server optimized for concurrent requests.
-* **Memory Efficient:** Uses **Lazy Loading** and API-based embeddings to run on lightweight cloud instances (Render Free Tier).
-* **Global Access:** Dockerized container with system-level dependencies (Poppler, Tesseract).
+### 4. High-Performance Architecture
+
+* **Backend**: Asynchronous **FastAPI** server optimized for concurrent requests.
+* **Memory Efficient**: Uses **Lazy Loading** and API-based embeddings to run on lightweight cloud instances (Render Free Tier).
+* **Global Access**: Dockerized container with system-level dependencies (Poppler, Tesseract).
 
 ---
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 ### Frontend
-* **Framework:** [React](https://reactjs.org/) / [Next.js](https://nextjs.org/) (Vite)
-* **Styling:** Tailwind CSS
-* **Deployment:** Vercel
+
+* **Framework**: React / Next.js (Vite)
+* **Styling**: Tailwind CSS
+* **Deployment**: Vercel
 
 ### Backend
-* **Framework:** [FastAPI](https://fastapi.tiangolo.com/) (Python)
-* **Database:** MongoDB Atlas (Async `motor` driver)
-* **AI Models:**
-    * **LLM:** Llama 3.1-8b-Instant & Llama 3.3-70b-Versatile (via [Groq](https://groq.com/))
-    * **Embeddings:** sentence-transformers/all-MiniLM-L6-v2 (via [Hugging Face Inference API](https://huggingface.co/inference-api))
-* **OCR & Processing:** `pytesseract`, `pdf2image`, `poppler-utils`
-* **Deployment:** Docker on Render
+
+* **Framework**: FastAPI (Python)
+* **Database**: MongoDB Atlas (Async Motor Driver)
+* **AI Models**:
+
+  * **LLM**: Llama 3.1-8b-Instant & Llama 3.3-70b-Versatile (via Groq)
+  * **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2` (via Hugging Face Inference API)
+* **OCR & Processing**: pytesseract, pdf2image, poppler-utils
+* **Deployment**: Docker on Render
 
 ---
 
-## 🏗️ Architecture
+##  Architecture
 
-The system follows a **Microservices-lite** pattern managed by a central `RouterAgent`:
+The system follows a **Microservices-lite** pattern managed by a central **RouterAgent**:
 
 ```mermaid
 graph TD
@@ -85,25 +92,27 @@ graph TD
     subgraph "SchedulerBot"
         Sched -->|Plan| Groq
     end
+```
 
+---
 
-⚙️ Local Installation
-Prerequisites
-Python 3.10+
+## Local Installation
 
-Node.js & npm
+### Prerequisites
 
-MongoDB Atlas Connection String
+* Python 3.10+
+* Node.js & npm
+* MongoDB Atlas connection string
+* API Keys: **Groq Cloud**, **Hugging Face**
+* System Tools: `poppler-utils` and `tesseract-ocr` (if running locally without Docker)
 
-API Keys: Groq Cloud, Hugging Face Token
+---
 
-System Tools: poppler-utils and tesseract-ocr (if running locally without Docker)
+### 1️⃣ Backend Setup
 
-1. Backend Setup
-Bash
-
+```bash
 # Clone the repository
-git clone [https://github.com/your-username/nexus-ai-tutor.git](https://github.com/your-username/nexus-ai-tutor.git)
+git clone https://github.com/your-username/nexus-ai-tutor.git
 cd nexus-ai-tutor/backend
 
 # Create virtual environment
@@ -115,9 +124,13 @@ pip install -r requirements.txt
 
 # Run server
 uvicorn main:app --reload
-2. Frontend Setup
-Bash
+```
 
+---
+
+### 2️⃣ Frontend Setup
+
+```bash
 cd ../frontend
 
 # Install dependencies
@@ -125,26 +138,33 @@ npm install
 
 # Run development server
 npm run dev
-🔐 Environment Variables
-Create a .env file in the backend directory with the following secrets:
+```
 
-Code snippet
+---
 
+## 🔐 Environment Variables
+
+### Backend (`.env`)
+
+```env
 MONGO_URI=mongodb+srv://<username>:<password>@cluster.mongodb.net/?retryWrites=true&w=majority
 GROQ_API_KEY=gsk_...
 HF_TOKEN=hf_...
-For the Frontend, create a .env.local file:
+```
 
-Code snippet
+### Frontend (`.env.local`)
 
+```env
 VITE_BACKEND_URL=http://localhost:8000
-🐳 Docker Deployment (Production)
+```
+
+---
+
+## 🐳 Docker Deployment (Production)
+
 The backend is fully containerized to handle system dependencies like OCR tools.
 
-Dockerfile:
-
-Dockerfile
-
+```dockerfile
 FROM python:3.10-slim
 
 WORKDIR /app
@@ -163,20 +183,26 @@ COPY . .
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-🤝 Contributing
+```
+
+---
+
+## Contributing
+
 Contributions are welcome! Please follow these steps:
 
-Fork the repository.
+1. Fork the repository
+2. Create a new branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-Create a new branch (git checkout -b feature/AmazingFeature).
+---
 
-Commit your changes (git commit -m 'Add some AmazingFeature').
+## License
 
-Push to the branch (git push origin feature/AmazingFeature).
+Distributed under the **MIT License**. See `LICENSE` for more information.
 
-Open a Pull Request.
+---
 
-📜 License
-Distributed under the MIT License. See LICENSE for more information.
-
-<p align="center"> Made with ❤️ for the IITI Community</p>
+<p align="center">Made with ❤️ for the IITI Community</p>
