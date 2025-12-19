@@ -105,21 +105,21 @@ class QueryBot:
                             batch_emb = batch_arr
                         embeddings_list.append(batch_emb)
                     except Exception as e:
-                        print(f"❌ Batch error: {e}")
+                        print(f"Batch error: {e}")
 
                 if embeddings_list:
                     final_embeddings = np.concatenate(embeddings_list, axis=0)
                     self.index = faiss.IndexFlatL2(final_embeddings.shape[1])
                     self.index.add(final_embeddings)
                     self.is_ready = True
-                    print(f"✅ [Background] FAISS Index Ready.")
+                    print(f"[Background] FAISS Index Ready.")
                 else:
-                    print("❌ No embeddings generated.")
+                    print(" No embeddings generated.")
             else:
-                print("⚠️ No course data found.")
+                print(" No course data found.")
                 self.is_ready = True
         except Exception as e:
-            print(f"❌ Background Initialization Failed: {e}")
+            print(f"Background Initialization Failed: {e}")
             self.is_ready = True
 
     async def load_course_chunks(self):
@@ -214,6 +214,7 @@ class QuestionPaperBot:
         self.api_key = os.getenv("GROQ_API_KEY")
 
     async def pdf_to_images(self, pdf_path, temp_dir):
+        # Only used if the file is actually a PDF
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor() as pool:
             images = await loop.run_in_executor(pool, convert_from_path, pdf_path, 300)
@@ -228,6 +229,7 @@ class QuestionPaperBot:
         loop = asyncio.get_event_loop()
         async def process_image(path):
             return await loop.run_in_executor(None, lambda: pytesseract.image_to_string(Image.open(path)))
+        
         tasks = [process_image(path) for path in image_paths]
         texts = await asyncio.gather(*tasks)
         return "\n".join(texts)
@@ -255,6 +257,7 @@ class QuestionPaperBot:
             if y < 50:
                 c.showPage()
                 y = height - 50
+            # Simple wrapping logic
             if len(line) > 90:
                 chunks = [line[i:i+90] for i in range(0, len(line), 90)]
                 for chunk in chunks:
@@ -267,14 +270,41 @@ class QuestionPaperBot:
         buffer.seek(0)
         return {"text": text, "pdf_file": buffer}
 
-    async def process_paper(self, pdf_path, mode="answer"):
+    async def process_file(self, file_path, mode="answer"):
+        """Smart processor that handles both PDF and Images"""
         with tempfile.TemporaryDirectory() as temp_dir:
-            image_paths = await self.pdf_to_images(pdf_path, temp_dir)
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            if file_ext == ".pdf":
+                print("Processing PDF...")
+                image_paths = await self.pdf_to_images(file_path, temp_dir)
+            elif file_ext in [".jpg", ".jpeg", ".png", ".webp"]:
+                print("Processing Image...")
+                image_paths = [file_path]
+            else:
+                return {"text": f"Unsupported file format: {file_ext}. Please upload a PDF or Image.", "pdf_file": None}
+
             raw_text = await self.extract_text(image_paths)
+            
+            # Debug: Check if text was actually found
+            if not raw_text or len(raw_text.strip()) < 5:
+                return {"text": "I could not read any text from the image. Please ensure the image is clear and contains readable text.", "pdf_file": None}
+
+            # Generate Answer
             if mode == "answer":
-                prompt = f"Provide solutions for:\n{raw_text}"
+                prompt = f"""You are an expert tutor. 
+                The user has provided an image/document with a question.
+                
+                EXTRACTED TEXT:
+                {raw_text}
+                
+                TASK:
+                1. Identify the question(s).
+                2. Provide a clear, step-by-step solution.
+                """
             else:
                 prompt = f"Generate a similar question paper based on:\n{raw_text}"
+                
             generated_text = await self.generate_text_via_llm(prompt)
             return self.text_to_formatted_pdf(generated_text)
 
@@ -324,13 +354,6 @@ class RouterAgent:
 
     async def route(self, user_prompt: str, user_id: str, conversation_id: str, file=None):
         query_type = await self.classify_prompt(user_prompt)
-        
-        
-        if query_type == "questionpaper" and not file:
-            print("Intent is 'questionpaper' but no file. Falling back to RAG Query.")
-            query_type = "query"
-        # ---------------------------------
-
         await self.chat_history_manager.save_message(user_id, conversation_id, "user", user_prompt)
         chat_history = await self.chat_history_manager.load_history(user_id, conversation_id)
 
@@ -340,17 +363,18 @@ class RouterAgent:
             qp_bot = QuestionPaperBot()
             mode = "generate" if "generate" in user_prompt.lower() else "answer"
             try:
-                result = await qp_bot.process_paper(file, mode=mode)
+                result = await qp_bot.process_file(file, mode=mode)
             except Exception as e:
-                return {"text": f"Failed to process the PDF. Error: {str(e)}", "pdf_file": None}
-                
+                print(f"Error processing paper: {e}")
+                return {"text": f" Failed to process the file. Error: {str(e)}", "pdf_file": None}
+
+        
         elif query_type == "scheduler":
             sch_bot = Scheduler()
             result = await sch_bot.run_scheduler(user_prompt)
-            
         else:
             if not global_query_bot.is_ready:
-                 return {"text": "System is still loading course data. Please try again in 30 seconds.", "pdf_file": None}
+                 return {"text": " System is still loading course data. Please try again in 30 seconds.", "pdf_file": None}
                  
             relevant_chunks = await global_query_bot.retrieve_relevant_chunks(user_prompt, chat_history=chat_history)
             result = await global_query_bot.query_llama(user_prompt, relevant_chunks, chat_history=chat_history)
@@ -394,7 +418,10 @@ app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True
 async def route_handler(request: Request, response: Response, prompt: str = Form(...), file: Optional[UploadFile] = File(None)):
     temp_file_path = None
     if file:
-        fd, temp_file_path = tempfile.mkstemp(suffix=".pdf")
+        file_ext = os.path.splitext(file.filename)[1]
+        if not file_ext: file_ext = ".pdf" 
+        
+        fd, temp_file_path = tempfile.mkstemp(suffix=file_ext)
         os.close(fd)
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
