@@ -324,33 +324,33 @@ class RouterAgent:
 
     async def route(self, user_prompt: str, user_id: str, conversation_id: str, file=None):
         query_type = await self.classify_prompt(user_prompt)
+        
+        
+        if query_type == "questionpaper" and not file:
+            print("Intent is 'questionpaper' but no file. Falling back to RAG Query.")
+            query_type = "query"
+        # ---------------------------------
+
         await self.chat_history_manager.save_message(user_id, conversation_id, "user", user_prompt)
         chat_history = await self.chat_history_manager.load_history(user_id, conversation_id)
 
         result = None
         
         if query_type == "questionpaper":
-            if not file:
-                return {
-                    "text": "It looks like you want me to solve a question paper, but no PDF was uploaded. Please upload a PDF file along with your prompt.",
-                    "pdf_file": None
-                }
-                
             qp_bot = QuestionPaperBot()
             mode = "generate" if "generate" in user_prompt.lower() else "answer"
             try:
                 result = await qp_bot.process_paper(file, mode=mode)
             except Exception as e:
-                print(f"Error processing paper: {e}")
-                return {"text": f" Failed to process the PDF. Error: {str(e)}", "pdf_file": None}
-
-        
+                return {"text": f"Failed to process the PDF. Error: {str(e)}", "pdf_file": None}
+                
         elif query_type == "scheduler":
             sch_bot = Scheduler()
             result = await sch_bot.run_scheduler(user_prompt)
+            
         else:
             if not global_query_bot.is_ready:
-                 return {"text": " System is still loading course data. Please try again in 30 seconds.", "pdf_file": None}
+                 return {"text": "System is still loading course data. Please try again in 30 seconds.", "pdf_file": None}
                  
             relevant_chunks = await global_query_bot.retrieve_relevant_chunks(user_prompt, chat_history=chat_history)
             result = await global_query_bot.query_llama(user_prompt, relevant_chunks, chat_history=chat_history)
