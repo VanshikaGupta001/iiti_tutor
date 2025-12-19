@@ -77,19 +77,20 @@ class QueryBot:
         self.chunks = []
         self.metadata = []
         self.index = None
-        self.is_ready = False  
+        self.is_ready = False
 
     async def initialize_data(self):
         """Loads data in background"""
         try:
-            print("[Background] Loading Course Data...")
+            print("🚀 [Background] Loading Course Data...")
             self.chunks, self.metadata = await self.load_course_chunks()
             
             if self.chunks:
-                print(f"[Background] Generating Embeddings for {len(self.chunks)} chunks...")
+                print(f"⏳ [Background] Generating Embeddings for {len(self.chunks)} chunks...")
                 loop = asyncio.get_event_loop()
                 embeddings_list = []
                 
+                # Manual batching
                 batch_size = 20
                 for i in range(0, len(self.chunks), batch_size):
                     batch = self.chunks[i:i+batch_size]
@@ -104,22 +105,22 @@ class QueryBot:
                             batch_emb = batch_arr
                         embeddings_list.append(batch_emb)
                     except Exception as e:
-                        print(f"Batch error: {e}")
+                        print(f"❌ Batch error: {e}")
 
                 if embeddings_list:
                     final_embeddings = np.concatenate(embeddings_list, axis=0)
                     self.index = faiss.IndexFlatL2(final_embeddings.shape[1])
                     self.index.add(final_embeddings)
                     self.is_ready = True
-                    print(f"[Background] FAISS Index Ready.")
+                    print(f"✅ [Background] FAISS Index Ready.")
                 else:
-                    print("No embeddings generated.")
+                    print("❌ No embeddings generated.")
             else:
-                print("No course data found.")
-                self.is_ready = True 
+                print("⚠️ No course data found.")
+                self.is_ready = True
         except Exception as e:
-            print(f" Background Initialization Failed: {e}")
-            self.is_ready = True 
+            print(f"❌ Background Initialization Failed: {e}")
+            self.is_ready = True
 
     async def load_course_chunks(self):
         try:
@@ -153,16 +154,23 @@ class QueryBot:
         return chunks, metadata
 
     async def retrieve_relevant_chunks(self, query, top_k=4, chat_history=None):
-        if not self.is_ready:
-            return []
-        if not self.index:
+        if not self.is_ready or not self.index:
             return []
             
         try:
+            # if query is vague make it look at history
+            search_query = query
+            if chat_history and len(chat_history) > 0:
+                last_user_msg = next((msg['content'] for msg in reversed(chat_history) if msg['role'] == 'user'), None)
+                
+                if last_user_msg:
+                    print(f"🔗 Enhancing query with history: {last_user_msg[:20]}...")
+                    search_query = f"{last_user_msg} {query}"
+
             loop = asyncio.get_event_loop()
             query_emb = await loop.run_in_executor(
                 None, 
-                lambda: self.hf_client.feature_extraction(query, model=self.EMBEDDING_MODEL_ID)
+                lambda: self.hf_client.feature_extraction(search_query, model=self.EMBEDDING_MODEL_ID)
             )
             query_vec = np.array(query_emb)
             if len(query_vec.shape) > 1:
@@ -176,15 +184,17 @@ class QueryBot:
             return []
 
     async def query_llama(self, query, context_chunks, chat_history: list = None):
-        # Fallback if system is still loading
         if not self.is_ready:
              return {"text": "System is still warming up (loading course data). Please try again in 30 seconds.", "pdf_file": None}
 
         context = "\n\n".join(f"Chunk: {chunk}" for chunk, meta in context_chunks)
         messages = [{"role": "system", "content": "You are a helpful academic assistant."}]
+        
+        # Pass full history to LLM to know conversation flow
         if chat_history:
             messages.extend(chat_history)
-        messages.append({"role": "user", "content": f"{context}\n\nQuestion: {query}"})
+            
+        messages.append({"role": "user", "content": f"Context Information:\n{context}\n\nUser Question: {query}"})
 
         payload = {
             "model": self.MODEL_NAME,
@@ -197,6 +207,7 @@ class QueryBot:
             response = await client.post(self.GROQ_API_URL, headers=headers, json=payload, timeout=20)
             response.raise_for_status()
             return {"text": response.json()["choices"][0]["message"]["content"].strip(), "pdf_file": None}
+        
 
 class QuestionPaperBot:
     def __init__(self):
@@ -295,6 +306,7 @@ class RouterAgent:
         prompt = f"""Classify into one: questionpaper, scheduler, or query.
         User Input: {user_prompt}
         Output (one word only):"""
+        
         payload = {
             "model": "llama-3.1-8b-instant",
             "messages": [{"role": "user", "content": prompt}],
@@ -316,14 +328,30 @@ class RouterAgent:
         chat_history = await self.chat_history_manager.load_history(user_id, conversation_id)
 
         result = None
+        
         if query_type == "questionpaper":
+            if not file:
+                return {
+                    "text": "It looks like you want me to solve a question paper, but no PDF was uploaded. Please upload a PDF file along with your prompt.",
+                    "pdf_file": None
+                }
+                
             qp_bot = QuestionPaperBot()
             mode = "generate" if "generate" in user_prompt.lower() else "answer"
-            result = await qp_bot.process_paper(file, mode=mode)
+            try:
+                result = await qp_bot.process_paper(file, mode=mode)
+            except Exception as e:
+                print(f"Error processing paper: {e}")
+                return {"text": f" Failed to process the PDF. Error: {str(e)}", "pdf_file": None}
+
+        
         elif query_type == "scheduler":
             sch_bot = Scheduler()
             result = await sch_bot.run_scheduler(user_prompt)
         else:
+            if not global_query_bot.is_ready:
+                 return {"text": " System is still loading course data. Please try again in 30 seconds.", "pdf_file": None}
+                 
             relevant_chunks = await global_query_bot.retrieve_relevant_chunks(user_prompt, chat_history=chat_history)
             result = await global_query_bot.query_llama(user_prompt, relevant_chunks, chat_history=chat_history)
 
