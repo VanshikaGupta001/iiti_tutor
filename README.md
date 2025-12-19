@@ -8,12 +8,12 @@
 
 ---
 
-## 🔗 Live Demo
+## Live Demo
 
 | Service | URL | Status |
 | :--- | :--- | :--- |
-| **Frontend (App)** | [**Visit Nexus AI**](https://iiti-tutor.vercel.app/) | 🟢 Live |
-| **Backend (API)** | [**API Docs**](https://iiti-tutor.onrender.com/docs) | 🟢 Live |
+| **Frontend (App)** | [**Visit Nexus AI**](https://iiti-tutor.vercel.app/) | Live |
+| **Backend (API)** | [**API Docs**](https://iiti-tutor.onrender.com/docs) | Live |
 
 ---
 
@@ -108,7 +108,7 @@ graph TD
 
 ---
 
-### 1️⃣ Backend Setup
+### 1️ Backend Setup
 
 ```bash
 # Clone the repository
@@ -128,7 +128,7 @@ uvicorn main:app --reload
 
 ---
 
-### 2️⃣ Frontend Setup
+### 2️ Frontend Setup
 
 ```bash
 cd ../frontend
@@ -142,7 +142,7 @@ npm run dev
 
 ---
 
-## 🔐 Environment Variables
+## Environment Variables
 
 ### Backend (`.env`)
 
@@ -160,7 +160,7 @@ VITE_BACKEND_URL=http://localhost:8000
 
 ---
 
-## 🐳 Docker Deployment (Production)
+## Docker Deployment (Production)
 
 The backend is fully containerized to handle system dependencies like OCR tools.
 
