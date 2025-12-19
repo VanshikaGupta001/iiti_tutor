@@ -352,7 +352,15 @@ async def lifespan(app: FastAPI):
     mongo_client.close()
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+# app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+origins = [
+    "http://localhost:5173",                 # Localhost for testing
+    "http://localhost:3000",                 # Alternative localhost
+    "https://iiti-tutor-frontend.vercel.app",#specific Vercel domain
+    "https://iiti-tutor.vercel.app"          #Production Vercel domain 
+]
+app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
 
 @app.post("/route")
 async def route_handler(request: Request, response: Response, prompt: str = Form(...), file: Optional[UploadFile] = File(None)):
